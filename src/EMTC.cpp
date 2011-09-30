@@ -31,27 +31,27 @@ const int SZ_INT = sizeof(int);
 const unsigned vidPerBlk = BLK_SZ/SZ_VID;
 
 //---------------------Experiment Settings ------------------
-const int maxNoPart = 164240000; //maximum number of nodes in each partition
-const int maxDeg = 4000*1024;	//maxium degree of graph
-const int maxNumPart = 300;	//maximum number of partitions |warning this value can not less than 2|
+const int maxNoPart = 164240000;	//maximum number of nodes in each partition
+const int maxDeg = 4000*1024;		//maxium degree of graph
+const int maxNumPart = 300;			//maximum number of partitions
 const float scale = 1.5;
 
 //---------------------Global Variables ---------------------
 long * tc;
 long Gno;
 long Gsz;
-long maxBlkPart = 32;
-count_type * result;  //list of no of local triangles
-count_type totalNumber; //total number of triangles
-long noRead;
-long noWrite;
-float partTime;
+long maxBlkPart = 32; 	// maximal number of IO_BLK in one partition
+count_type * result;  	// list of no of local triangles
+count_type totalNumber; // total number of triangles
+long noRead;			// number of read
+long noWrite;			// number of write
+float partTime;			// time of running partitioning
 
 
-FILE * iGraph;
+FILE * iGraph;			// input graph
 
-char * rbuff;
-char * wbuff;
+char * rbuff;			// read buffer
+char * wbuff;			// write buffer
 
 char * mem;
 vid ** cGraph;
@@ -172,7 +172,7 @@ void emtcA() {
 
 			//count the number of triangles in memory
 			//fprintf(stderr,"begin imct \n");
-			//ImCt(readCount);
+			ImCt(readCount);
 			//fprintf(stderr,"END imct \n");
 			//remove inter-partition edges and output part of new graph
 			long rmNum = 0;
@@ -273,355 +273,15 @@ void emtcA() {
 		//outputGraph(noCGraph,"newGraph.txt");
 
 	}
-	printf("%IT iteration %d\n",iteration);
+	printf("iteration %d\n",iteration);
 
 }
-
-
-//best effort partitioning
-void partB(FILE * bGraph, long szCGraph, int partNum, FILE ** partFile, long * partSz, long * partNo){
-
-
-	//greedy partitioning
-	unsigned ptrRbuff = 0;
-	long unProcessed = szCGraph;
-	long maxSz = maxBlkPart*BLK_SZ;	//maximum size of a partition
-
-	vid * reBuff= (vid *) rbuff;
-	fread(reBuff, SZ_VID, vidPerBlk, bGraph);
-
-	vid * dsPart = (vid *)malloc(Gno*SZ_VID);
-	memset(dsPart,-1,Gno*SZ_VID);
-
-	int * counters =  (int *) mem;
-	vid * adj = (vid *) mem+partNum*SZ_INT;
-
-	//initialize writing buffers
-	char * pbMem = (char *)malloc(partNum*(BLK_SZ+SZ_PTR+SZ_INT));
-
-	vid ** wrBuffs = (vid **)pbMem;
-	char * curPos = pbMem+partNum*SZ_PTR;
-
-	for(int i=0;i<partNum;i++){
-		wrBuffs[i] = (vid *) curPos;
-		curPos += BLK_SZ;
-	}
-
-	int * ptrWbuffs = (int *)curPos;
-	memset(ptrWbuffs,0,partNum*SZ_INT);
-
-	//partition the graph by scanning the graph once
-	int readCount = 0;
-	while(unProcessed>0){
-
-		vid u = adj[0] = reBuff[ptrRbuff];
-
-		if((++ptrRbuff)== vidPerBlk){
-			fread(reBuff, SZ_VID, vidPerBlk, bGraph);
-			ptrRbuff = 0;
-		}
-
-		vid u_deg = adj[1] = reBuff[ptrRbuff];
-
-		if ((++ptrRbuff) == vidPerBlk) {
-			fread(reBuff, SZ_VID, vidPerBlk, bGraph);
-			ptrRbuff = 0;
-		}
-
-		//----------decide which partition u belong to------------------
-		memset(counters,0,partNum*SZ_VID);	//empty the counters
-
-		for(int i=0; i<u_deg;i++){
-
-			int v = adj[i+2] = reBuff[ptrRbuff];
-
-			if ((++ptrRbuff) == vidPerBlk) {
-				fread(reBuff, SZ_VID, vidPerBlk, bGraph);
-				ptrRbuff = 0;
-			}
-
-			if(dsPart[v]>=0){
-				counters[ dsPart[v] ] ++;
-			}
-		}
-
-		//find the partition with most neigbbors
-		int maxCount = -1;
-		int maxPart = 0;
-
-		for(int i=0;i<partNum;i++){
-			if( counters[i]>maxCount && (partSz[i]+(2+u_deg)*SZ_VID <= maxSz)){
-				maxCount = counters[i];
-				maxPart = i;
-			}
-		}
-
-		if(maxCount == -1){
-			fprintf(stderr, "rc %d u %d cannot find a valid partition \n",readCount,u);
-			exit(1);
-		}
-		else if(maxCount == 0){
-			int minSz = partSz[0];
-			for (int i = 0; i < partNum; i++) {
-				if (partSz[i] < minSz && (partSz[i] + (2 + u_deg) * SZ_VID <= maxSz)) {
-					maxPart = i;
-					minSz = partSz[i];
-				}
-			}
-		}
-
-		//copy u and its adjacent list to the buffer
-		int cpAmt = u_deg+2;
-		unProcessed -= cpAmt*SZ_VID;
-		partSz[maxPart] += cpAmt*SZ_VID;
-		partNo[maxPart] ++;
-		dsPart[u] = maxPart;
-
-		while(cpAmt>0){
-			if ((unsigned)cpAmt < vidPerBlk-ptrWbuffs[maxPart]) {
-
-				memcpy(wrBuffs[maxPart]+ptrWbuffs[maxPart],adj+(u_deg+2-cpAmt),cpAmt*SZ_VID);
-				ptrWbuffs[maxPart] += cpAmt;
-				cpAmt = 0;
-
-			} else {//cpAmt > vidPerBlk-ptrWbuffs[maxPart]
-
-				memcpy(wrBuffs[maxPart]+ptrWbuffs[maxPart],adj+(u_deg+2-cpAmt),(vidPerBlk-ptrWbuffs[maxPart])*SZ_VID);
-				fwrite(wrBuffs[maxPart],SZ_VID,vidPerBlk,partFile[maxPart]);
-				cpAmt -= vidPerBlk-ptrWbuffs[maxPart];
-				ptrWbuffs[maxPart] = 0;
-				noWrite++;
-			}
-		}
-
-		readCount++;
-	}
-
-	//flush buffer
-	for(int i=0;i<partNum;i++){
-		if(ptrWbuffs[i]>0){
-			fwrite(wrBuffs[i],SZ_VID,ptrWbuffs[i],partFile[i]);
-			noWrite++;
-		}
-	}
-
-	//output information
-	delete dsPart;
-	delete pbMem;
-
-}
-
-//triangle counting algorithm using best effort partitioning
-void emtcB(){
-
-	long szCGraph = Gsz;	//initial size of current graph
-	long noCGraph = Gno;	//initial number of nodes of current graph
-
-	FILE * GraphFile = iGraph;
-	FILE * tmpGraph;	//temp file
-	FILE ** partFile = (FILE **)malloc(maxNumPart*SZ_PTR); //partition files
-
-	long * partSz = (long *)malloc(maxNumPart*SZ_LONG);
-	long * partNo = (long *)malloc(maxNumPart*SZ_LONG);
-
-	int iteration = 0;
-
-	while(true){
-
-		printf("begin %d th iteration \n",iteration);
-		printf("Graph size: %ld \n",szCGraph);
-
-		tmpGraph = tmpfile();
-
-		//decide number of partitions
-		int num_part;
-
-		if( szCGraph > (maxBlkPart*BLK_SZ)*2 ){
-			num_part = szCGraph/(maxBlkPart*BLK_SZ)+1;
-		}
-		else{
-			num_part = 2;
-		}
-
-		//initialize files
-		for(int i=0;i<num_part;i++){
-			partFile[i] = tmpfile();
-			partSz[i] = 0;
-			partNo[i] = 0;
-		}
-
-		rewind(GraphFile);
-		partB(GraphFile, szCGraph, num_part, partFile,partSz,partNo);
-
-		long ptrWbuff = 0;
-
-		szCGraph = 0;
-		noCGraph = 0;
-
-		for(int i = 0;i<num_part; i++){
-
-			printf("processing part: %d \n",i);
-
-			long cPartNo = partNo[i];	//get number of vertices of part i
-
-			int numBlkRead,readCount = 0;
-
-			partSz[i]%BLK_SZ==0?numBlkRead = partSz[i]/BLK_SZ:numBlkRead = partSz[i]/BLK_SZ+1;
-
-			char * curPos = mem;
-			char * endPos = mem+numBlkRead*BLK_SZ;
-
-			vid * adj;	//avoid unnecessary adress redirection
-
-			//load partition i into memory
-
-			rewind(partFile[i]);
-			//cmap.clear();
-			memset(cmap,-1,Gno*SZ_VID);
-
-			for(int j=0;j<numBlkRead;j++){
-				size_t readNum = fread(curPos, SZ_VID, vidPerBlk, partFile[i]);
-				if (readNum != (size_t) vidPerBlk) {
-					fprintf(stderr, "readNum %zu \n", readNum);
-				}
-
-				noRead++;
-				curPos += BLK_SZ;
-			}
-
-			curPos = mem;
-
-			while (readCount < cPartNo) {
-
-				adj = cGraph[readCount] = (vid *) curPos;
-
-				if ((curPos + (2 + adj[1]) * SZ_VID) > endPos){
-					fprintf(stderr,"error,rc %d part[%d] is out of bound\n",readCount,i);
-					exit(1);
-				}
-
-				curPos += (adj[1] + 2) * SZ_VID;
-				cmap[ adj[0] ] = readCount;
-				readCount++;
-
-			}
-
-			if(readCount!=cPartNo){
-				fprintf(stderr,"readCount %d cPartNo %ld",readCount,cPartNo);
-				exit(1);
-			}
-
-			//in memory triangle computation
-			ImCt(readCount);
-
-			//remove intra-partition edges and write new graph file
-			for (int i = 0; i < readCount; i++) {
-				adjBuff[0] = cGraph[i][0];
-				vid i_deg = cGraph[i][1] + 2;
-				vid n_deg = 0;
-
-				for (int j = 2; j < i_deg; j++) {
-					//if (cmap.find(cGraph[i][j]) == cmap.end()) {
-					if (cmap[ cGraph[i][j] ] == -1) {
-
-						adjBuff[n_deg + 2] = cGraph[i][j];
-						n_deg++;
-
-						if (n_deg == maxDeg) {
-							fprintf(stderr,"adjBuff is too small id %d n_deg %d\n",adjBuff[0], n_deg);
-							exit(1);
-						}
-					}
-				}
-
-				if (n_deg > 0) {
-
-					adjBuff[1] = n_deg;
-
-					//copy contents from adjBuff to writing buffer
-					int copyAmt = n_deg+2;
-
-					szCGraph += (n_deg + 2)*SZ_VID;
-					noCGraph++;
-
-					while (copyAmt > 0) {
-
-						if (copyAmt < vidPerBlk - ptrWbuff) {
-
-							memcpy(wbuff + ptrWbuff * SZ_VID, adjBuff + (n_deg
-									+ 2 - copyAmt), copyAmt * SZ_VID);
-							ptrWbuff = ptrWbuff + copyAmt;
-							copyAmt = 0;
-
-						} else { //copyAmt >= vidPerBlk-ptrWbuff
-
-							memcpy(wbuff + ptrWbuff * SZ_VID, adjBuff + (n_deg
-									+ 2 - copyAmt), (vidPerBlk - ptrWbuff)
-									* SZ_VID);
-							size_t writeNum = fwrite(wbuff, SZ_VID, vidPerBlk,
-									tmpGraph);
-							if (writeNum != (size_t)vidPerBlk) {
-								fprintf(stderr, "writeNum %zu\n", writeNum);
-							}
-
-							noWrite++;
-							//if (noWrite % 10 == 0)
-							//	printf("%ld th write \n", noWrite);
-
-							copyAmt -= vidPerBlk - ptrWbuff;
-							ptrWbuff = 0;
-
-						}
-					}
-
-				}
-			}
-
-
-		}
-
-		//flush buffer
-		if(ptrWbuff>0){
-			fwrite(wbuff,SZ_VID,ptrWbuff,tmpGraph);
-			ptrWbuff = 0;
-		}
-
-		for(int i=0;i<num_part;i++){
-			fclose( partFile[i] );
-		}
-
-		printf("iteration end, number of partition %d \n",num_part);
-		printf("-----------------------------------------\n");
-
-		if(num_part == 2){
-			break;
-		}
-		else{
-			fclose(GraphFile);
-			GraphFile = tmpGraph;
-		}
-
-		iteration++;
-	}
-
-	output("LJtri.txt");
-
-	delete partFile;
-	delete partSz;
-	delete partNo;
-
-
-}
-
-
 
 //dominating set based partitioning
 void partC(FILE * cGraph, long noCGraph, long szCGraph, int partNum, FILE ** partFile, long * partSz, long * partNo){
 
-
 	Runtimecounter rt;
 	rt.start();
-
 
 	//printf("noCGraph %ld\n",noCGraph);
 	//-------------computing dominating set-----------------
@@ -665,7 +325,7 @@ void partC(FILE * cGraph, long noCGraph, long szCGraph, int partNum, FILE ** par
 
 		//checking validity of u here
 		if(u>Gno || u<0){
-			fprintf(stderr,"partc u: %d i %d\n",u,i);
+			fprintf(stderr,"partc u: %d i %ld\n",u,i);
 			exit(1);
 		}
 
@@ -886,11 +546,11 @@ void emtcC(){
 	long noCGraph = Gno; //initial number of nodes of current graph
 
 	FILE * GraphFile = iGraph;
-	FILE * tmpGraph; //temp file
-	FILE ** partFile = (FILE **) malloc(maxNumPart * SZ_PTR); //partition files
+	FILE * tmpGraph; 											//temp file
+	FILE ** partFile = (FILE **) malloc(maxNumPart * SZ_PTR); 	//partition files
 
-	long * partSz = (long *) malloc(SZ_LONG * maxNumPart);	//list of partition size
-	long * partNo = (long *) malloc(SZ_LONG * maxNumPart);	//list of node No. of each partition
+	long * partSz = (long *) malloc(SZ_LONG * maxNumPart);		//list of partition size
+	long * partNo = (long *) malloc(SZ_LONG * maxNumPart);		//list of node No. of each partition
 
 	int iteration = 0;
 
@@ -902,15 +562,8 @@ void emtcC(){
 		//------------determine number of partitions---------------------
 		int num_part;
 
-		if( szCGraph > (maxBlkPart*BLK_SZ)*2 ){
-			num_part = szCGraph/(maxBlkPart*BLK_SZ)+1;
-		}
-		else if(szCGraph < maxBlkPart*BLK_SZ){
-			num_part = 1;
-		}
-		else{
-			num_part = 2;
-		}
+
+		num_part = szCGraph/(maxBlkPart*BLK_SZ)+1;
 
 		memset(partSz,0,SZ_LONG * maxNumPart);
 		memset(partNo,0,SZ_LONG * maxNumPart);
@@ -938,11 +591,12 @@ void emtcC(){
 		szCGraph = 0;
 		noCGraph = 0;
 
+		//In memory triangle list one part by one part
 		for(int i = 0;i<num_part; i++){
 
 			printf("processing part: %d \n",i);
 
-			long cPartNo = partNo[i];	//get number of vertices of part i
+			long cPartNo = partNo[i];				//get number of vertices of part i
 
 			int numBlkRead,readCount = 0;
 
@@ -951,11 +605,11 @@ void emtcC(){
 			char * curPos = mem;
 			char * endPos = mem+numBlkRead*BLK_SZ;
 
-			vid * adj;	//avoid unnecessary adress redirection
+			vid * adj;								//avoid unnecessary adress redirection
 
 			//load partition i into memory
-
 			rewind(partFile[i]);
+
 			//cmap.clear();
 			memset(cmap,-1,Gno*SZ_VID);
 
@@ -991,9 +645,8 @@ void emtcC(){
 				exit(1);
 			}
 
-
 			//in memory triangle computation
-			//ImCt(partNo[i]);
+			ImCt(partNo[i]);
 
 			//remove intra-partition edges and write new graph file
 			for (int k = 0; k < readCount; k++) {
@@ -1087,7 +740,7 @@ void emtcC(){
 
 	//output the result
 	//output("LJtri.txt");
-	printf("%IT iteration %d\n",iteration);
+	printf("Iteration %d\n",iteration);
 
 	free(partFile);
 	free(partSz);
@@ -1104,15 +757,18 @@ void ImCt(int noNodePart){
 
 	for(int i=0;i<noNodePart;i++){
 
+#ifdef OUTPUTPROGRESS
 		if(i%10000 == 0){
 			fprintf(stderr,"\r i %d",i);
 		}
+#endif
+
 		int v = cGraph[i][0];
 		int v_deg = cGraph[i][1]+2;
 		count_type tv = 0;
 
+		//vertex ordering
 		int j = 2;
-
 		int startJ = 0;
 
 		while(j < v_deg){
@@ -1134,10 +790,9 @@ void ImCt(int noNodePart){
 			vid it = cmap[u];
 
 			if(it>=0){
-				//int idx = (*it).second;
+
 				vid idx = it;
 				int u_deg = cGraph[idx][1]+2;
-
 
 				for(int k=2;k<u_deg;k++){
 
@@ -1148,8 +803,7 @@ void ImCt(int noNodePart){
 							tu++;
 							tv++;
 						} else {
-							//map<vid, int>::iterator iti = cmap.find(cGraph[idx][k]);
-							//if (iti == cmap.end()) {
+
 							if(cmap[ cGraph[idx][k] ]==-1){
 								result[ cGraph[idx][k] ]++;
 								tu++;
@@ -1171,6 +825,31 @@ void ImCt(int noNodePart){
 			bitmap[ cGraph[i][k] ] = false;
 		}
 
+	}
+
+}
+
+//randomized graph partition
+void randomPartition(FILE * cGraph, long noCGraph, long szCGraph, int partNum, FILE ** partFile, long * partSz, long * partNo){
+
+}
+
+
+void emtcRandom(){
+
+	long szCGraph = Gsz; //initial size of current graph
+	long noCGraph = Gno; //initial number of nodes of current graph
+
+	FILE * GraphFile = iGraph;
+	FILE * tmpGraph; 											//temp file
+	FILE ** partFile = (FILE **) malloc(maxNumPart * SZ_PTR); 	//partition files
+
+	long * partSz = (long *) malloc(SZ_LONG * maxNumPart);		//list of partition size
+	long * partNo = (long *) malloc(SZ_LONG * maxNumPart);		//list of node No. of each partition
+
+	int iteration = 0;
+
+	while(true){
 
 	}
 
@@ -1180,11 +859,10 @@ void ImCt(int noNodePart){
 void output(const char * oName){
 
 	FILE * outfile = fopen(oName,"w");
-
 	totalNumber = 0;
 
 	for( int i = 0; i < Gno; i++){
-		fprintf(outfile,"%d:%ld\n",i,result[i]);
+		fprintf(outfile,"%d:%d\n",i,result[i]);
 	}
 
 	fclose(outfile);
@@ -1225,10 +903,13 @@ void outputGraph(int noNode, const char * gName){
 //argv[2]: number of vertices of input graph
 //argv[3]: size of input graph
 //argv[4]: partitioning method
+//			1. Sequential
+//			2. DS-Based
+//			3. Random
 int main(int argc, char * argv[]) {
 
-	if(argc!=4){
-		fprintf(stderr,"argv[1]-input file, argv[2]-number of vertices argv[3] size \n");
+	if(argc!=5){
+		fprintf(stderr,"1-input file, 2-No. of vertices 3-size of input grah 4-partiton method \n");
 		exit(1);
 	}
 
@@ -1240,6 +921,7 @@ int main(int argc, char * argv[]) {
 
 	Gno = atoi(argv[2]);
 	Gsz = atol(argv[3]);
+	int method = atoi(argv[4]);
 	//Gsz = 4409148160;
 
 	rbuff = (char *)malloc(BLK_SZ);
@@ -1258,11 +940,25 @@ int main(int argc, char * argv[]) {
 
 	Runtimecounter rt;
 	rt.start();
-	printf("maxBlkPart %d\n",maxBlkPart);
-	emtcC();
+	printf("maxBlkPart %ld\n",maxBlkPart);
+
+	if(method == 1){
+		emtcA();
+	}
+	else if(method == 2){
+		emtcC();
+	}
+	else if(method == 3){
+		emtcRandom();
+	}
+	else{
+		fprintf(stderr,"Wrong Input Parameter of Method %d \n",method);
+		exit(EXIT_FAILURE);
+	}
+
 	rt.stop();
-	printf("%TIME total time: %f s \n",rt.GetRuntime());
-	printf("partition Time %f s\n",partTime);
+	printf("TIME total time: %f s \n",rt.GetRuntime());
+	printf("Partition Time %f s\n",partTime);
 	printf("No. of fread %ld \n",noRead);
 	printf("No. of fwrite %ld \n",noWrite);
 	output("BTCTriA.txt");
