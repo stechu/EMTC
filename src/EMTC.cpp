@@ -851,6 +851,186 @@ void emtcRandom(){
 
 	while(true){
 
+		printf("begin %d th iteration \n",iteration);
+		printf("Graph size: %ld \n",szCGraph);
+
+		//------------determine number of partitions---------------------
+		int num_part;
+
+		num_part = szCGraph/(maxBlkPart*BLK_SZ)+1;
+
+		memset(partSz,0,SZ_LONG * maxNumPart);
+		memset(partNo,0,SZ_LONG * maxNumPart);
+
+		tmpGraph = tmpfile();			//output graph after triangle listing
+
+		//call partitioning algorithm
+		for(int i=0;i<num_part;i++){
+			partFile[i] = tmpfile();
+			partSz[i] = 0;
+			partNo[i] = 0;
+		}
+
+		rewind(GraphFile);
+		if(num_part > 1){
+			randomPartition(GraphFile, noCGraph, szCGraph, num_part, partFile,partSz,partNo);
+		}
+		else{
+			partFile[0] = GraphFile;
+			partNo[0] = noCGraph;
+			partSz[0] = szCGraph;
+		}
+		long ptrWbuff = 0;
+
+		szCGraph = 0;
+		noCGraph = 0;
+
+		//In memory triangle list one part by one part
+		for(int i = 0;i<num_part; i++){
+
+			printf("processing part: %d \n",i);
+
+			long cPartNo = partNo[i];				//get number of vertices of part i
+
+			int numBlkRead,readCount = 0;
+
+			partSz[i]%BLK_SZ==0?numBlkRead = partSz[i]/BLK_SZ:numBlkRead = partSz[i]/BLK_SZ+1;
+
+			char * curPos = mem;
+			char * endPos = mem+numBlkRead*BLK_SZ;
+
+			vid * adj;								//avoid unnecessary adress redirection
+
+			//load partition i into memory
+			rewind(partFile[i]);
+
+			//cmap.clear();
+			memset(cmap,-1,Gno*SZ_VID);
+
+			for(int j=0;j<numBlkRead;j++){
+				size_t readNum = fread(curPos, SZ_VID, vidPerBlk, partFile[i]);
+				if (readNum != (size_t) vidPerBlk) {
+					fprintf(stderr, "readNum %zu \n", readNum);
+				}
+
+				noRead++;
+				curPos += BLK_SZ;
+			}
+
+			curPos = mem;
+
+			while (readCount < cPartNo) {
+
+				adj = cGraph[readCount] = (vid *) curPos;
+
+				if ((curPos + (2 + adj[1]) * SZ_VID) > endPos){
+					fprintf(stderr,"2error, rc %d part[%d] out bound, nbr %d deg %d p \n",readCount,i,numBlkRead,adj[0]);
+					exit(1);
+				}
+
+				curPos += (adj[1] + 2) * SZ_VID;
+				cmap[ adj[0] ] = readCount;
+				readCount++;
+
+			}
+
+			if(readCount!=cPartNo){
+				fprintf(stderr,"readCount %d cPartNo %ld",readCount,cPartNo);
+				exit(1);
+			}
+
+			//in memory triangle computation
+			ImCt(partNo[i]);
+
+			//remove intra-partition edges and write new graph file
+			for (int k = 0; k < readCount; k++) {
+				adjBuff[0] = cGraph[k][0];
+				vid i_deg = cGraph[k][1] + 2;
+				vid n_deg = 0;
+
+				for (int j = 2; j < i_deg; j++) {
+
+					if (cmap[ cGraph[k][j] ] == -1) {
+
+						adjBuff[n_deg + 2] = cGraph[k][j];
+						n_deg++;
+
+						if (n_deg == maxDeg) {
+							fprintf(stderr,"adjBuff is too small id %d n_deg %d\n",adjBuff[0], n_deg);
+							exit(1);
+						}
+					}
+				}
+
+				if (n_deg > 0) {
+
+					adjBuff[1] = n_deg;
+
+					//copy contents from adjBuff to writing buffer
+					int copyAmt = n_deg+2;
+
+					szCGraph += (n_deg + 2)*SZ_VID;
+					noCGraph++;
+
+					while (copyAmt > 0) {
+
+						if (copyAmt < vidPerBlk - ptrWbuff) {
+
+							memcpy(wbuff + ptrWbuff * SZ_VID, adjBuff + (n_deg
+									+ 2 - copyAmt), copyAmt * SZ_VID);
+							ptrWbuff = ptrWbuff + copyAmt;
+							copyAmt = 0;
+
+						} else { //copyAmt >= vidPerBlk-ptrWbuff
+
+							memcpy(wbuff + ptrWbuff * SZ_VID, adjBuff + (n_deg
+									+ 2 - copyAmt), (vidPerBlk - ptrWbuff)
+									* SZ_VID);
+							size_t writeNum = fwrite(wbuff, SZ_VID, vidPerBlk,
+									tmpGraph);
+							if (writeNum != (size_t)vidPerBlk) {
+								fprintf(stderr, "writeNum %zu\n", writeNum);
+							}
+
+							noWrite++;
+							//if (noWrite % 10 == 0)
+							//	printf("%ld th write \n", noWrite);
+
+							copyAmt -= vidPerBlk - ptrWbuff;
+							ptrWbuff = 0;
+
+						}
+					}
+
+				}
+			}
+
+
+		}//end for
+
+		//flush buffer
+		if(ptrWbuff>0){
+			fwrite(wbuff,SZ_VID,ptrWbuff,tmpGraph);
+			ptrWbuff = 0;
+		}
+
+		for(int i=0;i<num_part;i++){
+			fclose(partFile[i]);
+		}
+
+		printf("-----------------------------------------------\n");
+
+
+		if(num_part <= 2){
+			break;
+		}
+		else{
+			fclose(GraphFile);
+			GraphFile = tmpGraph;
+		}
+
+		iteration++;
+
 	}
 
 }
